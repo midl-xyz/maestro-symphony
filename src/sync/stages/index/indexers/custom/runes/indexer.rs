@@ -13,6 +13,9 @@ use bitcoin::{Network, ScriptBuf, Transaction, hashes::Hash};
 use ordinals::{Artifact, Edict, Etching, Height, Rune, RuneId, Runestone};
 use serde::Deserialize;
 
+// Logging
+use tracing::debug;
+
 use super::tables::{
     RuneIdByNameKV, RuneInfo, RuneInfoByIdKV, RuneMintsByIdKV, RuneTerms, RuneUtxosByScriptKV,
     RuneUtxosByScriptKey, UtxoRunes,
@@ -196,8 +199,10 @@ impl ProcessTransaction for RunesIndexer {
         }
 
         if let Some(Artifact::Cenotaph(_)) = artifact {
-            for (_id, _balance) in unallocated {
-                // if cenotaph, all unallocated runes burned
+            for (id, balance) in &unallocated {
+                if *balance > 0 {
+                    debug!(?id, ?balance, "Runes burned due to cenotaph artifact");
+                }
             }
         } else {
             let pointer = artifact
@@ -227,8 +232,14 @@ impl ProcessTransaction for RunesIndexer {
                     }
                 }
             } else {
-                for (_id, _balance) in unallocated {
-                    // anything remaining in unallocated is burned (check bal greater than 0)
+                for (id, balance) in &unallocated {
+                    if *balance > 0 {
+                        debug!(
+                            ?id,
+                            ?balance,
+                            "Runes burned – no eligible output for allocation"
+                        );
+                    }
                 }
             }
         }
@@ -343,17 +354,25 @@ fn unallocated(
 
 fn mint(task: &mut IndexingTask, id: RuneId, height: BlockHeight) -> Result<Option<u128>, Error> {
     let Some(terms) = task.get::<RuneInfoByIdKV>(&id)?.and_then(|x| x.terms) else {
+        debug!(?id, "No minting terms found – skipping mint");
         return Ok(None);
     };
 
     if let Some(start) = terms.start_height {
         if height < start {
+            debug!(
+                ?id,
+                ?height,
+                ?start,
+                "Mint height below start – skipping mint"
+            );
             return Ok(None);
         }
     }
 
     if let Some(end) = terms.end_height {
         if height >= end {
+            debug!(?id, ?height, ?end, "Mint height beyond end – skipping mint");
             return Ok(None);
         }
     }
@@ -363,12 +382,15 @@ fn mint(task: &mut IndexingTask, id: RuneId, height: BlockHeight) -> Result<Opti
     let current_mints = task.get::<RuneMintsByIdKV>(&id)?.unwrap_or_default();
 
     if current_mints >= cap {
+        debug!(?id, current_mints, ?cap, "Mint cap reached – skipping mint");
         return Ok(None);
     }
 
     let new_mints = current_mints.checked_add(1).expect("mints overflow");
 
     task.set::<RuneMintsByIdKV>(id, new_mints)?;
+
+    debug!(?id, new_mints, "Mint successful");
 
     Ok(Some(terms.amount.unwrap_or_default()))
 }
@@ -451,6 +473,7 @@ fn etched(
 ) -> Result<Option<(RuneId, Rune)>, Error> {
     let tx_index = tx_index.try_into().expect("tx index u32 overflow");
 
+    // Determine the rune candidate based on the artifact type
     let rune = match artifact {
         Artifact::Runestone(runestone) => match runestone.etching {
             Some(etching) => etching.rune,
@@ -462,23 +485,52 @@ fn etched(
         },
     };
 
+    // Calculate the minimum rune allowed at the current height
     let minimum = Rune::minimum_at_height(
         network,
         Height(height.try_into().expect("height u32 overflow")),
     );
 
     let rune = if let Some(rune) = rune {
-        if rune < minimum
-            || rune.is_reserved()
-            || task.get::<RuneIdByNameKV>(&rune.n())?.is_some()
-            || !tx_commits_to_rune(tx, rune, height, resolver, confirmations_override)?
-        {
+        if rune < minimum {
+            debug!(
+                ?rune,
+                ?minimum,
+                "Rune below minimum threshold – skipping etch"
+            );
             return Ok(None);
         }
+
+        if rune.is_reserved() {
+            debug!(?rune, "Rune is reserved – skipping etch");
+            return Ok(None);
+        }
+
+        if task.get::<RuneIdByNameKV>(&rune.n())?.is_some() {
+            debug!(?rune, "Rune name already exists – skipping etch");
+            return Ok(None);
+        }
+
+        if !tx_commits_to_rune(tx, rune, height, resolver, confirmations_override)? {
+            debug!(
+                ?rune,
+                "Transaction does not commit to rune (insufficient confirmations) – skipping etch"
+            );
+            return Ok(None);
+        }
+
         rune
     } else {
-        Rune::reserved(height, tx_index)
+        // If no rune specified in the etching, create a reserved rune identifier
+        let reserved = Rune::reserved(height, tx_index);
+        debug!(
+            ?reserved,
+            "No explicit rune provided – reserving automatically"
+        );
+        reserved
     };
+
+    debug!(?rune, "Rune etching accepted");
 
     Ok(Some((
         RuneId {
