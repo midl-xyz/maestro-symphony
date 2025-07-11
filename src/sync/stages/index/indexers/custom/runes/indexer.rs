@@ -407,25 +407,39 @@ fn tx_commits_to_rune(
     let required_confirmations =
         confirmations_override.unwrap_or(Runestone::COMMIT_CONFIRMATIONS.into());
 
+    debug!(
+        ?rune,
+        ?height,
+        confirmations_override,
+        required_confirmations,
+        "Checking if transaction commits to rune"
+    );
+
     for input in &tx.input {
         // extracting a tapscript does not indicate that the input being spent
         // was actually a taproot output. this is checked below, when we load the
         // output's entry from the database
         let Some(tapscript) = input.witness.tapscript() else {
+            debug!(prev_out = ?input.previous_output, "Input witness missing tapscript – skipping input");
             continue;
         };
 
         for instruction in tapscript.instructions() {
             // ignore errors, since the extracted script may not be valid
             let Ok(instruction) = instruction else {
+                debug!(
+                    "Encountered invalid tapscript instruction – aborting instruction scan for this input"
+                );
                 break;
             };
 
             let Some(pushbytes) = instruction.push_bytes() else {
+                debug!("Instruction is not a push – skipping");
                 continue;
             };
 
             if pushbytes.as_bytes() != commitment {
+                debug!("Pushbytes do not match commitment – continuing scan");
                 continue;
             }
 
@@ -440,6 +454,7 @@ fn tx_commits_to_rune(
                 .as_script()
                 .is_p2tr()
             {
+                debug!(?txo_ref, "Commitment script is not P2TR – skipping input");
                 continue;
             }
 
@@ -452,7 +467,16 @@ fn tx_commits_to_rune(
                 .expect("rune commit overflow");
 
             if confirmations >= required_confirmations {
+                debug!(
+                    confirmations,
+                    "Sufficient confirmations found for rune commitment"
+                );
                 return Ok(true);
+            } else {
+                debug!(
+                    confirmations,
+                    "Insufficient confirmations for rune commitment so far"
+                );
             }
         }
     }
