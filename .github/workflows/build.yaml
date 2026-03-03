@@ -1,7 +1,8 @@
 name: Build Binaries
 
 on:
-    workflow_dispatch:
+    release:
+        types: [published]
 
 env:
     CARGO_TERM_COLOR: always
@@ -10,17 +11,15 @@ jobs:
     build-binaries:
         runs-on: ubuntu-latest
         permissions:
-            contents: read
+            contents: write
         strategy:
             fail-fast: false
             matrix:
                 include:
                     - target: x86_64-unknown-linux-gnu
-                      arch: amd64
                       linker: x86_64-linux-gnu-gcc
                       deps: gcc-x86-64-linux-gnu g++-x86-64-linux-gnu libc6-dev-amd64-cross
                     - target: aarch64-unknown-linux-gnu
-                      arch: arm64
                       linker: aarch64-linux-gnu-gcc
                       deps: gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross
         steps:
@@ -62,14 +61,12 @@ jobs:
 
             - name: Package binary
               run: |
-                  mkdir -p dist
-                  tar -C target/${{ matrix.target }}/release \
-                    -czf dist/maestro-symphony-${{ matrix.target }}.tar.gz \
-                    maestro-symphony
+                  mkdir -p build/bin
+                  cp target/${{ matrix.target }}/release/maestro-symphony \
+                    build/bin/maestro-symphony-${{ matrix.target }}
 
-            - name: Upload binary artifact
-              uses: actions/upload-artifact@v4
+            - name: Upload binary to release
+              uses: softprops/action-gh-release@v2
               with:
-                  name: maestro-symphony-${{ matrix.arch }}
-                  path: dist/maestro-symphony-${{ matrix.target }}.tar.gz
-                  if-no-files-found: error
+                  files: |
+                      build/bin/maestro-symphony-${{ matrix.target }}
