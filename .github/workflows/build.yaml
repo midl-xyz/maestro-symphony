@@ -34,6 +34,9 @@ jobs:
                   channel: 1.87
                   targets: ${{ matrix.target }}
 
+            - name: Install Rust target
+              run: rustup target add ${{ matrix.target }}
+
             - name: Setup Rust cache
               uses: Swatinem/rust-cache@v2
               with:
